@@ -1,0 +1,316 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<template>
+	<groupId>f6a1e9e3-ec6e-3b18-0000-000000000000</groupId>
+	<name>VLXUSER_ETL_FLOW</name>
+	<description>ETL Flow to scan all VLXUSER tables, extract account patterns, insert to Oracle target, exceptions to ETL_EXCEPTIONS</description>
+	<timestamp>2025-05-22T22:00:00.000Z</timestamp>
+	<snippet>
+		<processGroups/>
+		<remoteProcessGroups/>
+		<processors>
+			<!-- Processor 1: ExecuteSQL to list tables -->
+			<processor>
+				<id>e_sql_list_tables</id>
+				<name>List VLXUSER Tables</name>
+				<class>org.apache.nifi.processors.standard.ExecuteSQL</class>
+				<bundle>
+					<group>org.apache.nifi</group>
+					<artifact>nifi-standard-nar</artifact>
+					<version>2.0.0-M1</version>
+				</bundle>
+				<config>
+					<properties>
+						<property>
+							<name>SQL select query</name>
+							<value>
+                                SELECT TABLE_NAME FROM ALL_TABLES 
+                                WHERE OWNER = 'VLXUSER' 
+                                AND TABLE_NAME NOT LIKE 'ETL_%'
+                            </value>
+						</property>
+						<property>
+							<name>Database Connection Pooling Service</name>
+							<value>DBCPConnectionPool</value>
+						</property>
+					</properties>
+				</config>
+			</processor>
+			<!-- Processor 2: SplitText -->
+			<processor>
+				<id>split_table_names</id>
+				<name>Split Table Names</name>
+				<class>org.apache.nifi.processors.standard.SplitText</class>
+				<bundle>
+					<group>org.apache.nifi</group>
+					<artifact>nifi-standard-nar</artifact>
+					<version>2.0.0-M1</version>
+				</bundle>
+				<config>
+					<properties>
+						<property>
+							<name>Line Split Count</name>
+							<value>1</value>
+						</property>
+					</properties>
+				</config>
+			</processor>
+			<!-- Processor 3: GenerateTableFetch -->
+			<processor>
+				<id>gen_table_fetch</id>
+				<name>GenerateTableFetch (batch 500)</name>
+				<class>org.apache.nifi.processors.standard.GenerateTableFetch</class>
+				<bundle>
+					<group>org.apache.nifi</group>
+					<artifact>nifi-standard-nar</artifact>
+					<version>2.0.0-M1</version>
+				</bundle>
+				<config>
+					<properties>
+						<property>
+							<name>Database Connection Pooling Service</name>
+							<value>DBCPConnectionPool</value>
+						</property>
+						<property>
+							<name>Table Name</name>
+							<value>${table.name}</value>
+						</property>
+						<property>
+							<name>Maximum-value Columns</name>
+							<value>ID</value>
+							<!-- change to your PK column or timestamp -->
+						</property>
+						<property>
+							<name>Partition Size</name>
+							<value>500</value>
+						</property>
+					</properties>
+				</config>
+			</processor>
+			<!-- Processor 4: ExecuteSQL - fetch batch rows -->
+			<processor>
+				<id>exec_sql_batch</id>
+				<name>ExecuteSQL - fetch batch rows</name>
+				<class>org.apache.nifi.processors.standard.ExecuteSQL</class>
+				<bundle>
+					<group>org.apache.nifi</group>
+					<artifact>nifi-standard-nar</artifact>
+					<version>2.0.0-M1</version>
+				</bundle>
+				<config>
+					<properties>
+						<property>
+							<name>Database Connection Pooling Service</name>
+							<value>DBCPConnectionPool</value>
+						</property>
+					</properties>
+				</config>
+			</processor>
+			<!-- Processor 5: QueryRecord -->
+			<processor>
+				<id>query_record</id>
+				<name>QueryRecord - regex extract</name>
+				<class>org.apache.nifi.processors.standard.QueryRecord</class>
+				<bundle>
+					<group>org.apache.nifi</group>
+					<artifact>nifi-standard-nar</artifact>
+					<version>2.0.0-M1</version>
+				</bundle>
+				<config>
+					<properties>
+						<property>
+							<name>Record Reader</name>
+							<value>AvroReader</value>
+							<!-- or CSVReader / JsonReader -->
+						</property>
+						<property>
+							<name>Record Writer</name>
+							<value>AvroWriter</value>
+							<!-- or CSVWriter / JsonWriter -->
+						</property>
+						<property>
+							<name>SQL select query</name>
+							<value>
+                                SELECT *, REGEXP_EXTRACT(NOTES, '\\d{8,12}') AS EXTRACTED_ACCOUNT
+                                FROM FLOWFILE
+                            </value>
+						</property>
+					</properties>
+				</config>
+			</processor>
+			<!-- Processor 6: RouteOnAttribute -->
+			<processor>
+				<id>route_attr</id>
+				<name>RouteOnAttribute - has match?</name>
+				<class>org.apache.nifi.processors.standard.RouteOnAttribute</class>
+				<bundle>
+					<group>org.apache.nifi</group>
+					<artifact>nifi-standard-nar</artifact>
+					<version>2.0.0-M1</version>
+				</bundle>
+				<config>
+					<properties>
+						<property>
+							<name>has_match</name>
+							<value>${record.EXTRACTED_ACCOUNT:exists():notNull()}</value>
+						</property>
+					</properties>
+				</config>
+			</processor>
+			<!-- Processor 7: PutDatabaseRecord - success path -->
+			<processor>
+				<id>put_db_record_success</id>
+				<name>PutDatabaseRecord - insert to target</name>
+				<class>org.apache.nifi.processors.standard.PutDatabaseRecord</class>
+				<bundle>
+					<group>org.apache.nifi</group>
+					<artifact>nifi-standard-nar</artifact>
+					<version>2.0.0-M1</version>
+				</bundle>
+				<config>
+					<properties>
+						<property>
+							<name>Database Connection Pooling Service</name>
+							<value>DBCPConnectionPool</value>
+						</property>
+						<property>
+							<name>Table Name</name>
+							<value>${table.name}</value>
+						</property>
+					</properties>
+				</config>
+			</processor>
+			<!-- Processor 8: PutDatabaseRecord - exceptions -->
+			<processor>
+				<id>put_db_record_exceptions</id>
+				<name>PutDatabaseRecord - exceptions</name>
+				<class>org.apache.nifi.processors.standard.PutDatabaseRecord</class>
+				<bundle>
+					<group>org.apache.nifi</group>
+					<artifact>nifi-standard-nar</artifact>
+					<version>2.0.0-M1</version>
+				</bundle>
+				<config>
+					<properties>
+						<property>
+							<name>Database Connection Pooling Service</name>
+							<value>DBCPConnectionPool</value>
+						</property>
+						<property>
+							<name>Table Name</name>
+							<value>ETL_EXCEPTIONS</value>
+						</property>
+					</properties>
+				</config>
+			</processor>
+		</processors>
+		<connections/>
+		<controllerServices/>
+		<connections>
+			<!-- From List VLXUSER Tables to SplitText -->
+			<connection>
+				<id>conn_1</id>
+				<sourceId>e_sql_list_tables</sourceId>
+				<destinationId>split_table_names</destinationId>
+			</connection>
+			<!-- From SplitText to GenerateTableFetch -->
+			<connection>
+				<id>conn_2</id>
+				<sourceId>split_table_names</sourceId>
+				<destinationId>gen_table_fetch</destinationId>
+			</connection>
+			<!-- From GenerateTableFetch to ExecuteSQL (batch fetch) -->
+			<connection>
+				<id>conn_3</id>
+				<sourceId>gen_table_fetch</sourceId>
+				<destinationId>exec_sql_batch</destinationId>
+			</connection>
+			<!-- From ExecuteSQL (batch) to QueryRecord -->
+			<connection>
+				<id>conn_4</id>
+				<sourceId>exec_sql_batch</sourceId>
+				<destinationId>query_record</destinationId>
+			</connection>
+			<!-- From QueryRecord to RouteOnAttribute -->
+			<connection>
+				<id>conn_5</id>
+				<sourceId>query_record</sourceId>
+				<destinationId>route_attr</destinationId>
+			</connection>
+			<!-- From RouteOnAttribute "matched" to PutDatabaseRecord (target) -->
+			<connection>
+				<id>conn_6</id>
+				<sourceId>route_attr</sourceId>
+				<destinationId>put_db_record_success</destinationId>
+			</connection>
+			<!-- From RouteOnAttribute "unmatched" to PutDatabaseRecord (target) -->
+			<connection>
+				<id>conn_7</id>
+				<sourceId>route_attr</sourceId>
+				<destinationId>put_db_record_success</destinationId>
+			</connection>
+			<!-- Failure from any processor to PutDatabaseRecord (exceptions) -->
+			<connection>
+				<id>conn_8</id>
+				<sourceId>put_db_record_success</sourceId>
+				<destinationId>put_db_record_exceptions</destinationId>
+			</connection>
+		</connections>
+		<controllerServices>
+			<!-- Oracle DBCPConnectionPool -->
+			<controllerService>
+				<id>dbcp_oracle</id>
+				<name>Oracle DBCPConnectionPool</name>
+				<class>org.apache.nifi.dbcp.DBCPConnectionPool</class>
+				<bundle>
+					<group>org.apache.nifi</group>
+					<artifact>nifi-dbcp-service-nar</artifact>
+					<version>2.0.0-M1</version>
+				</bundle>
+				<properties>
+					<property>
+						<name>Database Connection URL</name>
+						<value>jdbc:oracle:thin:@//your_oracle_host:1521/your_service</value>
+					</property>
+					<property>
+						<name>Database Driver Class Name</name>
+						<value>oracle.jdbc.OracleDriver</value>
+					</property>
+					<property>
+						<name>Database Driver Location(s)</name>
+						<value>C:\ibm\nifi\lib\ojdbc11.jar</value>
+					</property>
+					<property>
+						<name>Database User</name>
+						<value>VLXUSER</value>
+					</property>
+					<property>
+						<name>Password</name>
+						<value>your_password</value>
+					</property>
+				</properties>
+			</controllerService>
+			<!-- Record Reader -->
+			<controllerService>
+				<id>record_reader</id>
+				<name>AvroReader</name>
+				<class>org.apache.nifi.avro.AvroReader</class>
+				<bundle>
+					<group>org.apache.nifi</group>
+					<artifact>nifi-avro-nar</artifact>
+					<version>2.0.0-M1</version>
+				</bundle>
+			</controllerService>
+			<!-- Record Writer -->
+			<controllerService>
+				<id>record_writer</id>
+				<name>AvroWriter</name>
+				<class>org.apache.nifi.avro.AvroRecordSetWriter</class>
+				<bundle>
+					<group>org.apache.nifi</group>
+					<artifact>nifi-avro-nar</artifact>
+					<version>2.0.0-M1</version>
+				</bundle>
+			</controllerService>
+		</controllerServices>
+	</snippet>
+</template>
